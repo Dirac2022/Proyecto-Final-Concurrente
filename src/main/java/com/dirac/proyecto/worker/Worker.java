@@ -1,160 +1,155 @@
 package com.dirac.proyecto.worker;
 
 import com.dirac.proyecto.core.Message;
-import com.dirac.proyecto.core.Message.MessageType;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.net.Socket;
-import java.util.HashMap;
+import java.io.*;
+import java.net.*;
+import java.util.Arrays;
 import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.*;
 
 public class Worker {
     private final String masterAddress;
     private final int masterPort;
-    private Socket masterSocket;
-    private ObjectOutputStream out;
-    private ObjectInputStream in;
+    private final int listenPort;
+    private ObjectOutputStream masterOut;
+    private String workerId;
+    private final Object masterOutputLock = new Object();
+    private final Map<Integer, Object> primarySegments = new ConcurrentHashMap<>();
+    private final Map<Integer, Object> replicaSegments = new ConcurrentHashMap<>();
 
-    // Almacena los segmentos de datos. La clave es el ID del segmento.
-    private final Map<Integer, double[]> dataSegments = new HashMap<>();
-
-    public Worker(String masterAddress, int masterPort) {
-        this.masterAddress = masterAddress;
-        this.masterPort = masterPort;
+    public Worker(String masterAddress, int masterPort, int listenPort) {
+        this.masterAddress = masterAddress; this.masterPort = masterPort; this.listenPort = listenPort; this.workerId = "Worker@" + listenPort;
     }
 
     public void start() throws Exception {
-        System.out.println("Worker iniciando, conectando a Master en " + masterAddress + ":" + masterPort);
-        masterSocket = new Socket(masterAddress, masterPort);
-        out = new ObjectOutputStream(masterSocket.getOutputStream());
-        in = new ObjectInputStream(masterSocket.getInputStream());
-
-        // 1. Registrarse con el Master
-        out.writeObject(new Message(MessageType.REGISTER, null));
-        out.flush();
-
-        // 2. Iniciar el hilo de Heartbeat
-        startHeartbeat();
-
-        // 3. Escuchar comandos del Master en un bucle infinito
-        listenForCommands();
+        new Thread(this::startReplicaServer).start();
+        Socket masterSocket = new Socket(masterAddress, masterPort);
+        masterOut = new ObjectOutputStream(masterSocket.getOutputStream());
+        ObjectInputStream masterIn = new ObjectInputStream(masterSocket.getInputStream());
+        synchronized (masterOutputLock) {
+            masterOut.writeObject(new Message(Message.MessageType.REGISTER, listenPort));
+            masterOut.flush();
+        }
+        startHeartbeat(masterSocket);
+        listenForMasterCommands(masterIn);
     }
-
-    private void startHeartbeat() {
-        Thread heartbeatThread = new Thread(() -> {
-            while (!masterSocket.isClosed()) {
-                try {
-                    Thread.sleep(5000); // Enviar un heartbeat cada 5 segundos
-                    out.writeObject(new Message(MessageType.HEARTBEAT, null));
-                    out.flush();
-                } catch (Exception e) {
-                    System.err.println("No se pudo enviar el heartbeat. Master caído?");
-                    break;
-                }
+    
+    private void startReplicaServer() {
+        try (ServerSocket serverSocket = new ServerSocket(listenPort)) {
+            while (true) {
+                Socket sourceWorkerSocket = serverSocket.accept();
+                new Thread(() -> handleReplicaData(sourceWorkerSocket)).start();
             }
-        });
-        heartbeatThread.setDaemon(true); // El hilo no impedirá que el programa termine
-        heartbeatThread.start();
+        } catch (IOException e) { System.exit(1); }
     }
 
-    private void listenForCommands() {
+    private void handleReplicaData(Socket socket) {
+        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+            Message msg = (Message) in.readObject();
+            if (msg.getType() == Message.MessageType.REPLICA_DATA) {
+                Object[] payload = (Object[]) msg.getPayload();
+                replicaSegments.put((Integer) payload[0], payload[1]);
+            }
+        } catch (Exception e) { /* Ignorar */ }
+    }
+
+    private void listenForMasterCommands(ObjectInputStream in) {
         try {
             while (true) {
                 Message msg = (Message) in.readObject();
-                System.out.println("Comando recibido del Master: " + msg.getType());
-
-                switch (msg.getType()) {
+                 switch (msg.getType()) {
                     case DATA:
-                        Object[] dataPayload = (Object[]) msg.getPayload();
-                        int segmentId = (int) dataPayload[0];
-                        double[] segmentData = (double[]) dataPayload[1];
-                        dataSegments.put(segmentId, segmentData);
-                        System.out.println("Segmento " + segmentId + " recibido con " + segmentData.length + " elementos.");
+                        Object[] payload = (Object[]) msg.getPayload();
+                        primarySegments.put((Integer) payload[0], payload[1]);
+                        System.out.println("[" + workerId + "-INFO] Segmento primario " + payload[0] + " recibido/actualizado.");
+                        break;
+                    case REPLICATE_ORDER:
+                        handleReplicateOrder((Object[]) msg.getPayload());
                         break;
                     case COMPUTE:
-                        // Aquí se realiza el cálculo en paralelo
                         performComputation((Object[]) msg.getPayload());
                         break;
-                    // Aquí irían los casos para REPLICATE y PROMOTE_REPLICA
                     default:
-                        System.out.println("Comando desconocido: " + msg.getType());
                 }
             }
-        } catch (Exception e) {
-            System.err.println("Conexión con el Master perdida. Terminando.");
-            // e.printStackTrace();
-        } finally {
+        } catch (Exception e) { System.exit(1); }
+    }
+    
+    private void handleReplicateOrder(Object[] payload) {
+        new Thread(() -> {
             try {
-                masterSocket.close();
-            } catch (Exception e) { /* ignorar */ }
-        }
+                int segmentId = (int) payload[0]; String replicaAddress = (String) payload[1]; int replicaPort = (int) payload[2];
+                Object dataToReplicate = primarySegments.get(segmentId);
+                if (dataToReplicate == null) return;
+                try (Socket replicaSocket = new Socket(replicaAddress, replicaPort);
+                     ObjectOutputStream replicaOut = new ObjectOutputStream(replicaSocket.getOutputStream())) {
+                    replicaOut.writeObject(new Message(Message.MessageType.REPLICA_DATA, new Object[]{segmentId, dataToReplicate}));
+                }
+            } catch (Exception e) { /* Ignorar */ }
+        }).start();
     }
 
-    private void performComputation(Object[] payload) throws Exception {
-        int segmentId = (int) payload[0];
-        String operation = (String) payload[1];
+    @SuppressWarnings("unchecked")
+    private <T extends Number> void performComputation(Object[] payload) throws Exception {
+        int segmentId = (int) payload[0]; String operation = (String) payload[1];
+        Object dataObject = primarySegments.get(segmentId);
+        if (dataObject == null) return;
+
+        T[] data = (T[]) dataObject;
+        Number[] results = new Number[data.length];
         
-        double[] data = dataSegments.get(segmentId);
-        if (data == null) {
-            System.err.println("Error: No se encontraron datos para el segmento " + segmentId);
-            return;
-        }
-
-        double[] results = new double[data.length];
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         
-        // Usar todos los núcleos de la CPU
-        int cores = Runtime.getRuntime().availableProcessors();
-        ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(cores);
-
-        System.out.println("Iniciando computación en " + cores + " hilos para el segmento " + segmentId);
-
-        // Dividir el trabajo entre los hilos
-        int chunkSize = (int) Math.ceil((double) data.length / cores);
-        for (int i = 0; i < cores; i++) {
-            final int start = i * chunkSize;
-            final int end = Math.min(start + chunkSize, data.length);
-
+        for (int i = 0; i < data.length; i++) {
+            final int index = i;
             executor.submit(() -> {
-                for (int j = start; j < end; j++) {
-                    double x = data[j];
-                    // Ejemplo 1: Operación matemática compleja
-                    if (operation.equals("math")) {
-                        results[j] = Math.pow(Math.sin(x) + Math.cos(x), 2) / (Math.sqrt(Math.abs(x)) + 1);
+                try {
+                    T x = data[index];
+                    if ("math".equals(operation)) {
+                        results[index] = Math.pow(Math.sin(x.doubleValue()) + Math.cos(x.doubleValue()), 2) / (Math.sqrt(Math.abs(x.doubleValue())) + 1);
+                    } else if ("conditional".equals(operation)) {
+                        int val = x.intValue();
+                        if ((val % 3 == 0) || (val >= 500 && val <= 1000)) {
+                            if (val == 0) throw new ArithmeticException("log(0)");
+                            results[index] = (int) ((val * Math.log(val)) % 7);
+                            // System.out.println("Entra al calculo condicional: " + val + " -> " + results[index]);
+                        } else {
+                            results[index] = val;
+                        }
                     }
-                    // Aquí se añadiría la lógica para el Ejemplo 2 (condicional)
-                }
+                } catch (Exception e) { results[index] = -1; }
             });
         }
         
         executor.shutdown();
-        while (!executor.isTerminated()) {
-            // Esperar a que todos los hilos terminen
+        executor.awaitTermination(1, TimeUnit.HOURS);
+        System.out.println("[" + workerId + "-DEBUG] Array de resultados A PUNTO DE SER ENVIADO: " + Arrays.toString(results));
+        synchronized(masterOutputLock) {
+            masterOut.writeObject(new Message(Message.MessageType.RESULT, new Object[]{segmentId, results}));
+            masterOut.flush();
+            masterOut.reset(); // Limpiar el stream para evitar problemas de serialización
         }
-        
-        System.out.println("Computación terminada para el segmento " + segmentId);
-
-        // Enviar resultados al Master
-        Object[] resultPayload = new Object[]{segmentId, results};
-        out.writeObject(new Message(MessageType.RESULT, resultPayload));
-        out.flush();
+    }
+    
+    private void startHeartbeat(Socket masterSocket) {
+        Thread t = new Thread(() -> {
+            while (!masterSocket.isClosed()) {
+                try {
+                    Thread.sleep(5000);
+                    synchronized(masterOutputLock) {
+                        masterOut.writeObject(new Message(Message.MessageType.HEARTBEAT, null));
+                        masterOut.flush();
+                        masterOut.reset(); // Limpiar el stream para evitar problemas de serialización
+                    }
+                } catch (Exception e) { break; }
+            }
+        });
+        t.setDaemon(true);
+        t.start();
     }
 
     public static void main(String[] args) {
-        // Para ejecutar: java Worker.java <master_ip> <master_port>
-        if (args.length < 2) {
-            System.out.println("Uso: java com.mi_proyecto_distribuido.worker.Worker <master_ip> <master_port>");
-            return;
-        }
-        String masterAddress = args[0];
-        int masterPort = Integer.parseInt(args[1]);
-        
-        try {
-            new Worker(masterAddress, masterPort).start();
-        } catch (Exception e) {
-            System.err.println("Error al iniciar el Worker: " + e.getMessage());
-            e.printStackTrace();
-        }
+        if (args.length < 3) { System.out.println("Uso: java com.dirac.proyecto.worker.Worker <master_ip> <master_port> <my_listen_port>"); return; }
+        try { new Worker(args[0], Integer.parseInt(args[1]), Integer.parseInt(args[2])).start(); } catch (Exception e) { e.printStackTrace(); }
     }
 }

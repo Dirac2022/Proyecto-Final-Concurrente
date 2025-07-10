@@ -1,47 +1,124 @@
 package com.dirac.proyecto.master;
 
-import java.util.Arrays;
+import com.dirac.proyecto.core.DArray;
+import java.util.Scanner;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+
 public class App {
 
-    public static void main(String[] args) throws Exception {
-        // 1. Iniciar el Master
-        Master master = new Master(9090); // El master escucha en el puerto 9090
-        master.start();
+    public static void main(String[] args) {
+        // --- NO MODIFICAR ESTA SECCIÓN DE INICIO ---
+        Master master = new Master(9090);
+        Thread masterThread = new Thread(() -> {
+            try {
+                master.start();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+        masterThread.setDaemon(true);
+        masterThread.start();
 
-        // Esperar a que se conecten los workers. En un caso real, esto sería más robusto.
-        System.out.println("Esperando 10 segundos para que los workers se conecten...");
-        Thread.sleep(20000); 
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
 
-        // 2. Crear los datos
-        int arraySize = 20000; // Un array grande
-        double[] myArray = new double[arraySize];
-        for (int i = 0; i < arraySize; i++) {
-            myArray[i] = i + 1; // Llenar con datos simples 1, 2, 3...
+        System.out.println("====================================================================");
+        System.out.println("✅ Master iniciado. Por favor, inicia los workers en otras terminales.");
+        System.out.println("   Una vez que todos se hayan registrado, presiona ENTER aquí.");
+        System.out.println("====================================================================");
+        new Scanner(System.in).nextLine();
+
+        /*
+        // ======================= EJEMPLO 1: Procesamiento Matemático =======================
+        System.out.println("\n--- EJECUTANDO EJEMPLO 1: Procesamiento Matemático Asíncrono ---");
+        try {
+            Double[] doubleArray = new Double[100000];
+            for (int i = 0; i < doubleArray.length; i++) doubleArray[i] = (double) i;
+            DArray<Double> distDoubleArray = new DArray<>(doubleArray, master);
+
+            Future<Double[]> futureResult = distDoubleArray.applyOperation("math");
+            System.out.println("Operación enviada. El cliente ahora espera el resultado...");
+            
+            Double[] finalResult = futureResult.get(); 
+            
+            if (finalResult != null) {
+                System.out.println("Ejemplo 1 completado. Resultado recibido.");
+                System.out.println("Primeros 5 resultados: " + Arrays.toString(Arrays.copyOfRange(finalResult, 0, 5)));
+            } else {
+                System.err.println("El Ejemplo 1 falló. Revisa los logs del Master.");
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            System.err.println("Error durante la ejecución del Ejemplo 1: " + e.getMessage());
+        }
+        */
+
+        /*
+        // ======================= EJEMPLO 2: Evaluación Condicional Resiliente =======================
+        System.out.println("\n--- EJECUTANDO EJEMPLO 2: Evaluación Condicional Resiliente ---");
+        try {
+            Integer[] intArray = new Integer[1001]; // Tamaño 1001 para incluir el 1000
+            for (int i = 0; i < intArray.length; i++) intArray[i] = i;
+            DArray<Integer> distIntArray = new DArray<>(intArray, master);
+
+            Future<Integer[]> futureResult = distIntArray.applyOperation("conditional");
+            System.out.println("Operación enviada. El cliente ahora espera el resultado...");
+
+            Integer[] finalResult = futureResult.get();
+
+            if (finalResult != null) {
+                System.out.println("Ejemplo 2 completado. Resultado recibido.");
+                System.out.println("Revisa los logs de los workers para ver el manejo del error local en 'log(0)'.");
+                System.out.println("Resultado para el valor 0 (causó error): " + finalResult[0]);
+                System.out.println("Resultado para el valor 3 (múltiplo): " + finalResult[3]);
+                System.out.println("Resultado para el valor 499 (en rango): " + finalResult[499]);
+                System.out.println("Resultado para el valor 500 (en rango): " + finalResult[500]);
+                System.out.println("Resultado para el valor 501 (en rango): " + finalResult[501]);
+            } else {
+                 System.err.println("El Ejemplo 2 falló. Revisa los logs del Master.");
+            }
+        } catch (InterruptedException | ExecutionException e) {
+             System.err.println("Error durante la ejecución del Ejemplo 2: " + e.getMessage());
+        }
+        */
+
+        
+        // ======================= EJEMPLO 3: Simulación de Fallo y Recuperación =======================
+        System.out.println("\n--- EJECUTANDO EJEMPLO 3: Simulación de Fallo y Recuperación ---");
+        try {
+            int arraySize = 500000;
+            System.out.println("Creando un array grande de " + arraySize + " elementos...");
+            Double[] doubleArray = new Double[arraySize];
+            for (int i = 0; i < doubleArray.length; i++) doubleArray[i] = (double) i;
+            DArray<Double> distDoubleArray = new DArray<>(doubleArray, master);
+            
+            Future<Double[]> futureResult = distDoubleArray.applyOperation("math");
+            System.out.println("Operación enviada y EN CURSO.");
+            
+            System.out.println("Esperando 5 segundos para que el cómputo se estabilice...");
+            Thread.sleep(5000);
+
+            System.out.println("ATENCIÓN: AHORA es el momento de CERRAR LA TERMINAL de un worker primario.");
+            System.out.println("(Revisa los logs del Master para ver a quién se le asignaron los segmentos).");
+            System.out.println("Presiona ENTER aquí después de haber cerrado la terminal del worker.");
+            new Scanner(System.in).nextLine();
+
+            System.out.println("Esperando el resultado final (puede tardar si hubo recuperación)...");
+            Double[] finalResult = futureResult.get();
+
+            if (finalResult != null) {
+                 System.out.println("Ejemplo 3 completado. El sistema se recuperó del fallo y finalizó el cálculo.");
+            } else {
+                 System.err.println("El Ejemplo 3 falló. La recuperación no fue exitosa.");
+            }
+        } catch (InterruptedException | ExecutionException e) {
+             System.err.println("Error durante la ejecución del Ejemplo 3: " + e.getMessage());
         }
         
-        System.out.println("Array original creado con " + arraySize + " elementos.");
 
-        // 3. Crear el array distribuido
-        Master.DArrayDouble distributedArray = master.createDArrayDouble(myArray);
-
-        // 4. Ejecutar la operación del Ejemplo 1
-        System.out.println("\n--- INICIANDO EJEMPLO 1: PROCESAMIENTO MATEMÁTICO ---");
-        long startTime = System.currentTimeMillis();
-        
-        double[] results = distributedArray.applyOperation("math");
-        
-        long endTime = System.currentTimeMillis();
-
-        if (results != null) {
-            System.out.println("¡Cálculo completado exitosamente!");
-            System.out.println("Tiempo de ejecución: " + (endTime - startTime) + " ms");
-            // Imprimir una pequeña parte del resultado para verificar
-            System.out.println("Primeros 10 resultados: " + Arrays.toString(Arrays.copyOfRange(results, 0, 10)));
-            System.out.println("Últimos 10 resultados: " + Arrays.toString(Arrays.copyOfRange(results, results.length - 10, results.length)));
-        } else {
-            System.err.println("El cálculo falló.");
-        }
-        
-        // El programa principal termina aquí, pero el Master sigue corriendo para aceptar más trabajos.
+        System.out.println("\n--- Fin del programa cliente ---");
     }
 }
