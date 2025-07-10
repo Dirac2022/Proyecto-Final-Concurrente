@@ -35,12 +35,18 @@ public class Worker {
     }
     
     private void startReplicaServer() {
+        // Envolvemos todo en un try-catch para manejar el IOException del .accept()
         try (ServerSocket serverSocket = new ServerSocket(listenPort)) {
+            System.out.println("[" + workerId + "-INFO] Escuchando réplicas en puerto " + listenPort);
             while (true) {
-                Socket sourceWorkerSocket = serverSocket.accept();
+                Socket sourceWorkerSocket = serverSocket.accept(); // Esta línea ahora es válida
                 new Thread(() -> handleReplicaData(sourceWorkerSocket)).start();
             }
-        } catch (IOException e) { System.exit(1); }
+        } catch (IOException e) {
+            System.err.println("[" + workerId + "-FATAL] El puerto de escucha de réplicas " + listenPort + " falló.");
+            e.printStackTrace();
+            System.exit(1);
+        }
     }
 
     private void handleReplicaData(Socket socket) {
@@ -61,7 +67,6 @@ public class Worker {
                     case DATA:
                         Object[] payload = (Object[]) msg.getPayload();
                         primarySegments.put((Integer) payload[0], payload[1]);
-                        System.out.println("[" + workerId + "-INFO] Segmento primario " + payload[0] + " recibido/actualizado.");
                         break;
                     case REPLICATE_ORDER:
                         handleReplicateOrder((Object[]) msg.getPayload());
@@ -103,21 +108,20 @@ public class Worker {
         for (int i = 0; i < data.length; i++) {
             final int index = i;
             executor.submit(() -> {
-                try {
-                    T x = data[index];
-                    if ("math".equals(operation)) {
-                        results[index] = Math.pow(Math.sin(x.doubleValue()) + Math.cos(x.doubleValue()), 2) / (Math.sqrt(Math.abs(x.doubleValue())) + 1);
-                    } else if ("conditional".equals(operation)) {
-                        int val = x.intValue();
-                        if ((val % 3 == 0) || (val >= 500 && val <= 1000)) {
-                            if (val == 0) throw new ArithmeticException("log(0)");
+                T x = data[index];
+                if ("conditional".equals(operation)) {
+                    int val = x.intValue();
+                    try {
+                        if (val % 3 == 0 || (val >= 500 && val <= 1000)) {
+                            if (val == 0) throw new ArithmeticException("log(0) intencional");
                             results[index] = (int) ((val * Math.log(val)) % 7);
-                            // System.out.println("Entra al calculo condicional: " + val + " -> " + results[index]);
                         } else {
                             results[index] = val;
                         }
-                    }
-                } catch (Exception e) { results[index] = -1; }
+                    } catch (Exception e) { results[index] = -1; }
+                } else if ("math".equals(operation)) {
+                    results[index] = Math.pow(Math.sin(x.doubleValue()) + Math.cos(x.doubleValue()), 2) / (Math.sqrt(Math.abs(x.doubleValue())) + 1);
+                }
             });
         }
         
@@ -127,7 +131,7 @@ public class Worker {
         synchronized(masterOutputLock) {
             masterOut.writeObject(new Message(Message.MessageType.RESULT, new Object[]{segmentId, results}));
             masterOut.flush();
-            masterOut.reset(); // Limpiar el stream para evitar problemas de serialización
+            masterOut.reset();
         }
     }
     
@@ -139,7 +143,7 @@ public class Worker {
                     synchronized(masterOutputLock) {
                         masterOut.writeObject(new Message(Message.MessageType.HEARTBEAT, null));
                         masterOut.flush();
-                        masterOut.reset(); // Limpiar el stream para evitar problemas de serialización
+                        masterOut.reset();
                     }
                 } catch (Exception e) { break; }
             }

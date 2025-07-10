@@ -11,5 +11,7 @@ java -cp bin com.dirac.proyecto.master.App
 
 Iniciar workers
 ````sh
-java -cp bin com.dirac.proyecto.worker.Worker 192.168.18.7 9090
+java -cp bin com.dirac.proyecto.worker.Worker <IP-master> <puerto-master> <puerto-escucha-worker>
+# Ejemplo
+java -cp bin com.dirac.proyecto.worker.Worker 127.0.0.1 9090 9091
 ```
